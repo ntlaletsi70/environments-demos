@@ -1,0 +1,11 @@
+chdir /home/blanketops/BlanketOps/sources/environments-demos/4-supply-chain
+defscrollback 10000
+screen -t k9s 0 bash -c "while true; do k9s -n blanketops-environments; sleep 2; done"
+screen -t demo 1 bash scripts/run-demo.sh
+
+split
+focus top
+select 0
+focus bottom
+select 1
+focus top
