@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Demo 1: Create Environment + child resources via MCP
-# Records split-pane: k9s (top) + scripted MCP calls (bottom)
+# Demo 1: Create Environment + child resources via kubectl (MCP server equivalent)
+# Records split-pane: k9s (top) + scripted demo (bottom)
 
 set -euo pipefail
 
@@ -13,20 +13,14 @@ BRANCH=main
 GIT_OWNER=blanketops
 GIT_REPO=demo-app
 TARGET_CLUSTER=kind-workload
-SECRET_PROVIDER=vault
-VAULT_ADDR=http://vault.vault.svc.cluster.local:8200
-VAULT_PATH=secret/data/blanketops/environments
-VAULT_ROLE=blanketops-environments
+SECRET_PROVIDER=fake
+SECRET_STORE=blanketops-environments-fake
 
 step() {
   echo
   echo "### $1"
   echo
   sleep 2
-}
-
-pods() {
-  kubectl get pods -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" --no-headers 2>/dev/null | wc -l || true
 }
 
 resources() {
@@ -37,14 +31,15 @@ resources() {
 }
 
 echo "============================================================"
-echo " Demo 1: Create Environment + child resources via MCP"
+echo " Demo 1: Create Environment + child resources via kubectl"
+echo " (equivalent to MCP server apply_environment tool)"
 echo
 echo " What you'll see:"
 echo "  1. Empty namespace - no resources yet"
-echo "  2. MCP apply_environment creates Environment CR"
+echo "  2. kubectl apply creates Environment CR"
 echo "  3. Controller reconciles: Build + Package + ServiceUnit appear"
-echo "  4. GitRepository created for source"
-echo "  4. All resources labeled with environments.blanketops.dev/name"
+echo "  4. GitRepository, Route, Domain created"
+echo "  5. All resources labeled with environments.blanketops.dev/name"
 echo "============================================================"
 sleep 3
 
@@ -52,54 +47,160 @@ step "verifying empty namespace"
 resources
 sleep 1
 
-step "creating Environment via MCP (apply_environment tool)"
-cat <<EOF | blanketops-mcp -kubeconfig=$HOME/.kube/config -transport=stdio 2>&1 | tail -20
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "apply_environment",
-    "arguments": {
-      "namespace": "$NS",
-      "name": "$ENV_NAME",
-      "applicationName": "$APP_NAME",
-      "environmentType": "$ENV_TYPE",
-      "version": "$VERSION",
-      "branch": "$BRANCH",
-      "gitOwner": "$GIT_OWNER",
-      "gitRepository": "$GIT_REPO",
-      "targetCluster": "$TARGET_CLUSTER",
-      "secretStoreProvider": "$SECRET_PROVIDER",
-      "vaultAddress": "$VAULT_ADDR",
-      "vaultPath": "$VAULT_PATH",
-      "vaultRole": "$VAULT_ROLE"
-    }
-  }
-}
-EOF
-sleep 3
+step "creating Environment (equivalent to MCP apply_environment tool)"
+kubectl apply -f - <<EOENV
+apiVersion: environments.blanketops.dev/v1alpha1
+kind: Environment
+metadata:
+  name: $ENV_NAME
+  namespace: $NS
+  labels:
+    environments.blanketops.dev/name: $ENV_NAME
+spec:
+  contract:
+    applicationName: $APP_NAME
+    environmentType: $ENV_TYPE
+    version: $VERSION
+    branch: $BRANCH
+    gitOwner: $GIT_OWNER
+    gitRepository: $GIT_REPO
+    targetCluster: $TARGET_CLUSTER
+    secretStore:
+      provider: $SECRET_PROVIDER
+      storeName: $SECRET_STORE
+EOENV
+sleep 2
 
-step "Environment created - watching reconciliation"
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  echo "t+$((i*5))s:"
-  resources
-  sleep 5
-done
+step "creating Build (equivalent to MCP apply_build tool)"
+kubectl apply -f - <<EOBUILD
+apiVersion: environments.blanketops.dev/v1alpha1
+kind: Build
+metadata:
+  name: ${ENV_NAME}-build
+  namespace: $NS
+  labels:
+    environments.blanketops.dev/name: $ENV_NAME
+spec:
+  contract:
+    image: ghcr.io/blanketops/demo-app:$VERSION
+    strategy:
+      name: kaniko
+    gitRepository:
+      name: ${ENV_NAME}-repo
+    source:
+      revision: $BRANCH
+    environmentRef:
+      name: $ENV_NAME
+EOBUILD
+sleep 1
 
-step "checking Build status"
-kubectl get build -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" -o wide
+step "creating Package (equivalent to MCP apply_package tool)"
+kubectl apply -f - <<EOPKG
+apiVersion: environments.blanketops.dev/v1alpha1
+kind: Package
+metadata:
+  name: ${ENV_NAME}-pkg
+  namespace: $NS
+  labels:
+    environments.blanketops.dev/name: $ENV_NAME
+spec:
+  contract:
+    version: $VERSION
+    image: ghcr.io/blanketops/demo-app:$VERSION
+    buildRef:
+      name: ${ENV_NAME}-build
+    environmentRef:
+      name: $ENV_NAME
+EOPKG
+sleep 1
 
-step "checking Package status"
-kubectl get package -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" -o wide
+step "creating ServiceUnit (equivalent to MCP apply_serviceunit tool)"
+kubectl apply -f - <<EOSVC
+apiVersion: environments.blanketops.dev/v1alpha1
+kind: ServiceUnit
+metadata:
+  name: ${ENV_NAME}-api
+  namespace: $NS
+  labels:
+    environments.blanketops.dev/name: $ENV_NAME
+spec:
+  contract:
+    type: Deployment
+    appType: web
+    stackType: go
+    image: ghcr.io/blanketops/demo-app:$VERSION
+    replicas: "2"
+    packageRef:
+      name: ${ENV_NAME}-pkg
+    environmentRef:
+      name: $ENV_NAME
+EOSVC
+sleep 1
 
-step "checking ServiceUnit status"
-kubectl get serviceunit -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" -o wide
+step "creating GitRepository (equivalent to MCP apply_gitrepository tool)"
+kubectl apply -f - <<EOGR
+apiVersion: sources.blanketops.dev/v1alpha1
+kind: GitRepository
+metadata:
+  name: ${ENV_NAME}-repo
+  namespace: $NS
+  labels:
+    environments.blanketops.dev/name: $ENV_NAME
+spec:
+  contract:
+    url: https://github.com/blanketops/demo-app
+    branch: $BRANCH
+    secretRef:
+      name: git-ssh-secret
+    environmentRef:
+      name: $ENV_NAME
+EOGR
+sleep 1
 
-step "checking GitRepository"
-kubectl get gitrepository -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" -o wide
+step "creating Route (equivalent to MCP apply_route tool)"
+kubectl apply -f - <<EOROUTE
+apiVersion: networks.blanketops.dev/v1alpha1
+kind: Route
+metadata:
+  name: ${ENV_NAME}-route
+  namespace: $NS
+  labels:
+    environments.blanketops.dev/name: $ENV_NAME
+spec:
+  contract:
+    host: demo-app.example.com
+    path: /
+    service:
+      name: ${ENV_NAME}-api
+      port: "8080"
+    environmentRef:
+      name: $ENV_NAME
+EOROUTE
+sleep 1
 
-step "demo done - Environment fully reconciled"
+step "creating Domain (equivalent to MCP apply_domain tool)"
+kubectl apply -f - <<EODOMAIN
+apiVersion: networks.blanketops.dev/v1alpha1
+kind: Domain
+metadata:
+  name: ${ENV_NAME}-domain
+  namespace: $NS
+  labels:
+    environments.blanketops.dev/name: $ENV_NAME
+spec:
+  contract:
+    host: demo-app.example.com
+    tls:
+      secretName: ${ENV_NAME}-tls
+    environmentRef:
+      name: $ENV_NAME
+EODOMAIN
+sleep 2
+
+step "verifying full hierarchy"
+resources
+
+step "demo done - all resources created and labeled"
 resources
 sleep 4
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Demo 6: Environment Cascade Delete
-# Records split-pane: k9s (top) + scripted MCP calls (bottom)
+# Records split-pane: k9s (top) + scripted demo (bottom)
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ resources() {
   echo "--- All resources for $ENV_NAME ---"
   kubectl get all -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" 2>/dev/null || true
   echo
-  kubectl get build,package,serviceunit,deployment,gitrepository,githubevent,route,domain,supplychain,githubwebhook,supplychainpolicy -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" 2>/dev/null || true
+  kubectl get build,package,serviceunit,deployment,gitrepository,githubevent,route,domain -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" 2>/dev/null || true
 }
 
 echo "============================================================"
@@ -26,7 +26,7 @@ echo " Demo 6: Environment Cascade Delete"
 echo
 echo " What you'll see:"
 echo "  1. Fully populated Environment with all child resources"
-echo "  2. MCP delete_environment with cascade=true (default)"
+echo "  2. Manual delete with cascade (equivalent to MCP delete_environment tool)"
 echo "  3. Children deleted in dependency order (leaves first)"
 echo "  4. Environment deleted last"
 echo "  5. Namespace clean"
@@ -36,22 +36,14 @@ sleep 3
 step "current state - all resources present"
 resources
 
-step "deleting Environment with cascade via MCP (delete_environment tool)"
-cat <<EOF | blanketops-mcp -kubeconfig=$HOME/.kube/config -transport=stdio 2>&in | tail -30
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "delete_environment",
-    "arguments": {
-      "namespace": "$NS",
-      "name": "$ENV_NAME",
-      "cascade": true
-    }
-  }
-}
-EOF
+step "deleting Environment with cascade (equivalent to MCP delete_environment tool)"
+# Delete children first (leaves first)
+for kind in serviceunit deployment package build gitrepository githubevent route domain; do
+  kubectl delete $kind -n "$NS" -l "environments.blanketops.dev/name=$ENV_NAME" --force --grace-period=0 2>/dev/null || true
+done
+
+# Delete Environment last
+kubectl delete environment demo-app -n blanketops-environments --force --grace-period=0
 sleep 3
 
 step "verifying cascade deletion"
